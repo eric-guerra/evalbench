@@ -1,0 +1,59 @@
+name: evals
+
+# Runs the eval on PRs that touch the prompt or the generator; blocks merge on a real regression.
+on:
+  pull_request:
+    paths: ["evalbench/sut.py", "data/**", "evalbench/judge.py"]
+  push:
+    branches: [main]
+    paths: ["evalbench/sut.py"]
+
+concurrency:
+  group: evals-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -r requirements.txt
+      - run: pytest -q
+
+  eval:
+    needs: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: run eval
+        env: { ANTHROPIC_API_KEY: "${{ secrets.ANTHROPIC_API_KEY }}" }
+        run: python -m evalbench run --out runs/candidate.json
+      - name: gate against main's baseline
+        run: python -m evalbench gate --baseline baselines/main.json --candidate runs/candidate.json | tee gate.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: eval-run, path: "runs/\ngate.txt" }
+      - name: comment
+        if: always() && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with: { header: evals, path: gate.txt }
+
+  update-baseline:
+    if: github.event_name == 'push'
+    needs: eval
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: eval-run }
+      - run: |
+          cp runs/candidate.json baselines/main.json
+          git config user.name "evalbench-bot" && git config user.email "evalbench-bot@users.noreply.github.com"
+          git add baselines/main.json && git commit -m "evals: update baseline" && git push
